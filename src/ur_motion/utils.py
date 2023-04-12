@@ -1,6 +1,17 @@
 import copy
-from typing import List
+from typing import List, Union
 from geometry_msgs.msg import Pose, Vector3, Quaternion
+from tf.transformations import quaternion_from_euler, quaternion_multiply
+
+
+def pose_msg_to_list(pose: Pose) -> List:
+    pos = pose.position
+    quat = pose.orientation
+
+    pos = [pos.x, pos.y, pos.z]
+    quat = [quat.x, quat.y, quat.z, quat.w]
+
+    return pos + quat
 
 
 def offset_pose(pose: Pose, trans_offset: List = None, rot_offset: List = None) -> Pose:
@@ -36,7 +47,20 @@ def offset_joint(joint_state: List, joint_offset: List) -> List:
     return joint_state
 
 
-def make_pose(position: List = [0, 0, 0], orientation: List = [0, 0, 0, 0]) -> Pose:
-    assert len(position) == 3, "Incorrect dimensions for position"
-    assert len(orientation) == 4, "Incorrect dimensions for orientation"
-    return Pose(Vector3(*position), Quaternion(*orientation))
+def make_pose(pose: List) -> Pose:
+    assert len(pose) == 7, "pose must be of size 7. (xyz + quaternion)"
+    return Pose(Vector3(*pose[:3]), Quaternion(*pose[3:]))
+
+
+def rotate_tool(pose: Union[Pose, List], euler_offset: List) -> List:
+    if isinstance(pose, Pose):
+        pose = pose_msg_to_list(pose)
+    else:
+        assert len(pose) == 7
+    assert len(euler_offset) == 3
+
+    quat_1 = pose[3:]
+    quat_2 = quaternion_from_euler(*euler_offset, axes='rzyx')
+    quat_total = quaternion_multiply(quat_1, quat_2).tolist()
+
+    return pose[:3] + quat_total

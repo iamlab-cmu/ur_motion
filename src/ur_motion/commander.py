@@ -4,8 +4,7 @@ from __future__ import print_function
 import sys
 import math
 import numpy as np
-import time
-from typing import List, Union
+from typing import List, Optional, Union
 import pyquaternion as pyq
 
 import rospy
@@ -25,8 +24,6 @@ from cartesian_control_msgs.msg import (
 from moveit.core.kinematic_constraints import constructGoalConstraints
 from moveit_commander.conversions import pose_to_list
 from moveit_msgs.srv import GetMotionPlan
-from robotiq_urcap_control.msg import wrapper as gripperMsg
-from robotiq_urcap_control.msg import Robotiq2FGripper_robot_input as gripperStateMsg
 
 from controller_manager_msgs.srv import (
     LoadControllerRequest,
@@ -36,7 +33,7 @@ from controller_manager_msgs.srv import (
     SwitchController,
     SwitchControllerRequest,
 )
-from enum import Enum, IntEnum
+from enum import Enum
 
 
 ## Uncomment to use with Gazebo
@@ -52,18 +49,6 @@ class Controllers(str, Enum):
     TWIST = "twist_controller"
     JOINT_STATE = "joint_state_controller"
     FORCE = "force_torque_sensor_controller"
-
-
-class GripperStates(IntEnum):
-    OPEN = 102
-    CLOSE = 255
-
-
-class GripperMotionStates(IntEnum):
-    MOVING = 0
-    STOPPED_BARRIER_OUTSIDE = 1
-    STOPPED_BARRIER_INSIDE = 2
-    REACHED = 3
 
 
 _available_controllers = [
@@ -139,9 +124,6 @@ class RobotMoveGroup(object):
         "wrist_3_joint",
     ]
 
-    GRIPPER_SPEED_DEFAULT = 100
-    GRIPPER_FORCE_DEFAULT = 100
-
     def __init__(self, verbose: bool = False) -> None:
 
         self._verbose = verbose
@@ -149,12 +131,6 @@ class RobotMoveGroup(object):
         moveit_commander.roscpp_initialize(sys.argv)
         # set a default timeout threshold non-motion requests
         self.timeout = rospy.Duration(5)
-
-        self.gripper_pub = rospy.Publisher("/move_gripper", gripperMsg, queue_size=10)
-        rospy.Subscriber(
-            "/Robotiq2FGripperRobotInput", gripperStateMsg, self.update_gripper_state
-        )
-        self.gripper_motion_state = GripperMotionStates.REACHED
 
         # setup controller-manager ROS services
         self.switch_srv = rospy.ServiceProxy(
@@ -292,14 +268,14 @@ class RobotMoveGroup(object):
 
         self._active_controller = target_controller
 
-    def get_current_pose(self, stamped: bool = False) -> Union[Pose, PoseStamped]:
+    def get_current_pose(self, end_effector_link: str = "", stamped: bool = False) -> Union[Pose, PoseStamped]:
         """
         position in metres. orientation in radians
         """
         if stamped:
-            return self.move_group.get_current_pose()
+            return self.move_group.get_current_pose(end_effector_link=end_effector_link)
         else:
-            return self.move_group.get_current_pose().pose
+            return self.move_group.get_current_pose(end_effector_link=end_effector_link).pose
 
     def get_current_joints(self, in_degrees: bool = False) -> List:
         """
@@ -373,9 +349,14 @@ class RobotMoveGroup(object):
         pos_tolerance: float = 0.001,
         orient_tolerance: float = 0.01,
         velocity_scaling: float = 0.2,
+        eef_frame: Optional[str] = None,
         acc_scaling: float = 0.2,
         wait: bool = True,
     ) -> bool:
+
+        if eef_frame is None:
+            eef_frame = self.eef_frame
+
         self.switch_controller(Controllers.SCALED_POS_JOINT_TRAJ)
         # Check if MoveIt planner is running
         rospy.wait_for_service("/plan_kinematic_path", self.timeout)
@@ -391,7 +372,7 @@ class RobotMoveGroup(object):
         )
 
         constraints = constructGoalConstraints(
-            self.eef_frame, mp_req_pose_goal, pos_tolerance, orient_tolerance
+            eef_frame, mp_req_pose_goal, pos_tolerance, orient_tolerance
         )
         mp_req.goal_constraints.append(constraints)
         mp_req.max_velocity_scaling_factor = velocity_scaling
@@ -409,7 +390,7 @@ class RobotMoveGroup(object):
             # Calling ``stop()`` ensures that there is no residual movement
             self.move_group.stop()
             return _poses_close(
-                pose_goal, self.get_current_pose(), pos_tolerance, orient_tolerance
+                pose_goal, self.get_current_pose(eef_frame), pos_tolerance, orient_tolerance
             )
         return True
 
@@ -441,75 +422,3 @@ class RobotMoveGroup(object):
         """
         self.switch_controller(Controllers.TWIST)
         self.twist_pub.publish(twist)
-
-    def update_gripper_state(self, data) -> None:
-        """
-        Updates self.gripper_motion_state to reflect current motion state of gripper.
-        """
-        self.gripper_motion_state = data.gOBJ
-
-    def go_to_gripper_state(
-        self,
-        target_state: int,
-        wait: bool = False,
-        minWait: float = 1.5,
-        speed: int = 100,
-        force: int = 100
-    ) -> bool:
-        """
-        Moves gripper to given state.
-        """
-        if self._verbose:
-            print(f"Moving gripper to state {target_state}")
-        gripper_message = gripperMsg()
-        gripper_message.pos = target_state
-        gripper_message.speed = speed
-        gripper_message.force = force
-        self.gripper_pub.publish(gripper_message)
-        start = time.time()
-        if wait:
-            while time.time() < start + minWait:
-                pass
-            while self.gripper_motion_state == GripperMotionStates.MOVING:
-                rospy.sleep(0.1)
-                if time.time() > start + 10:
-                    return False
-        return True
-
-    def open_gripper(
-        self,
-        target_state=GripperStates.OPEN,
-        wait=False,
-        speed=100,
-        force=100
-    ) -> bool:
-        """
-        Opens gripper.
-        """
-        if self._verbose:
-            print("Opening gripper")
-        return self.go_to_gripper_state(
-            target_state=target_state,
-            wait=wait,
-            speed=speed,
-            force=force
-        )
-
-    def close_gripper(
-        self,
-        target_state=GripperStates.CLOSE,
-        wait=False,
-        speed=100,
-        force=100
-    ) -> bool:
-        """
-        Closes gripper.
-        """
-        if self._verbose:
-            print("Closing gripper")
-        return self.go_to_gripper_state(
-            target_state=target_state,
-            wait=wait,
-            speed=speed,
-            force=force
-        )
